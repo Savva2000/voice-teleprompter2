@@ -195,6 +195,7 @@ function handleSpeechResult(event) {
     const nearSkipLimit = 5;
     const nearRequiredSequence = 4;
     const farRequiredSequence = 5;
+    const localFollowRange = 3;
 
     const isLimitedSearchEnabled = limitSearchToggle?.checked;
     const maxVisibleWords = Math.max(1, parseInt(maxVisibleWordsSelect?.value, 10) || 10);
@@ -204,6 +205,23 @@ function handleSpeechResult(event) {
 
     if (visibleEndIndex <= currentWordIndex) {
         return;
+    }
+
+    // --- Быстрый локальный трекинг (для мгновенной подсветки) ---
+    // Ищем последнее сказанное слово рядом с текущей позицией и двигаем на 1 слово.
+    // Это возвращает «живую» реакцию как раньше.
+    const lastSpokenWord = spokenWords[spokenWords.length - 1];
+    if (lastSpokenWord) {
+        const localEnd = Math.min(currentWordIndex + localFollowRange, visibleEndIndex);
+
+        for (let checkIndex = currentWordIndex; checkIndex <= localEnd; checkIndex++) {
+            if (!isMatch(lastSpokenWord, scriptWords[checkIndex].clean)) continue;
+
+            currentWordIndex = checkIndex + 1;
+            highlightWord(checkIndex);
+            performScroll(checkIndex);
+            return;
+        }
     }
 
     const nearStart = currentWordIndex;
