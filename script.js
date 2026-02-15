@@ -4,6 +4,7 @@ let isListening = false; // Флаг: включен ли микрофон
 let scriptWords = []; // Массив объектов слов (текст, очищенный текст, HTML-элемент)
 let currentWordIndex = 0; // На каком слове мы сейчас находимся
 let lastProcessedTranscript = ''; // Защита от повторной обработки одинакового interim-текста
+let windowStartIndex = 0; // Начало "видимого" окна слов
 
 // --- Получаем элементы со страницы ---
 const setupScreen = document.getElementById('setup-screen');
@@ -112,6 +113,7 @@ function processText(rawText) {
     scriptWords = [];
     currentWordIndex = 0;
     lastProcessedTranscript = '';
+    windowStartIndex = 0;
 
     // Разбиваем текст на слова по пробелам и переносам строк
     const words = rawText.split(/\s+/);
@@ -142,6 +144,7 @@ function startListening() {
     if (!recognition) return;
     try {
         lastProcessedTranscript = '';
+        windowStartIndex = 0;
         recognition.start();
         isListening = true;
         updateMicVisuals(true);
@@ -189,33 +192,37 @@ function handleSpeechResult(event) {
         .map((word) => word.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, ""))
         .filter(Boolean);
 
-    // Режимы:
-    // 1) До 5 слов пропуска: нужно 4 подряд (мягкое сравнение)
-    // 2) Пропуск больше 5 слов: только 5 подряд (строгое сравнение)
-    const nearSkipLimit = 5;
-    const nearRequiredSequence = 4;
-    const farRequiredSequence = 5;
-    const localFollowRange = 3;
-
     const isLimitedSearchEnabled = limitSearchToggle?.checked;
     const maxVisibleWords = Math.max(1, parseInt(maxVisibleWordsSelect?.value, 10) || 10);
-    const visibleEndIndex = isLimitedSearchEnabled
-        ? Math.min(scriptWords.length - 1, currentWordIndex + maxVisibleWords)
-        : scriptWords.length - 1;
+    const shiftThreshold = Math.max(1, Math.floor(maxVisibleWords / 2));
+
+    let visibleStartIndex = 0;
+    let visibleEndIndex = scriptWords.length - 1;
+
+    if (isLimitedSearchEnabled) {
+        // Скользящее окно: например видим 20 слов, после прохождения 10 слов окно сдвигается
+        while (currentWordIndex - windowStartIndex >= shiftThreshold) {
+            windowStartIndex += shiftThreshold;
+        }
+
+        visibleStartIndex = windowStartIndex;
+        visibleEndIndex = Math.min(scriptWords.length - 1, visibleStartIndex + maxVisibleWords - 1);
+    } else {
+        windowStartIndex = 0;
+    }
 
     if (visibleEndIndex <= currentWordIndex) {
         return;
     }
 
-    // --- Быстрый локальный трекинг (для мгновенной подсветки) ---
-    // Ищем последнее сказанное слово рядом с текущей позицией и двигаем на 1 слово.
-    // Это возвращает «живую» реакцию как раньше.
-    const lastSpokenWord = spokenWords[spokenWords.length - 1];
-    if (lastSpokenWord) {
-        const localEnd = Math.min(currentWordIndex + localFollowRange, visibleEndIndex);
+    const searchStart = Math.max(currentWordIndex, visibleStartIndex);
 
-        for (let checkIndex = currentWordIndex; checkIndex <= localEnd; checkIndex++) {
-            if (!isMatch(lastSpokenWord, scriptWords[checkIndex].clean)) continue;
+    // Проверяем последние 3 услышанных слова — это дает быстрый отклик даже при промежуточных фразах
+    const spokenCandidates = spokenWords.slice(-3).reverse();
+
+    for (const spokenWord of spokenCandidates) {
+        for (let checkIndex = searchStart; checkIndex <= visibleEndIndex; checkIndex++) {
+            if (!isMatch(spokenWord, scriptWords[checkIndex].clean)) continue;
 
             currentWordIndex = checkIndex + 1;
             highlightWord(checkIndex);
@@ -223,73 +230,6 @@ function handleSpeechResult(event) {
             return;
         }
     }
-
-    const nearStart = currentWordIndex;
-    const nearEnd = Math.min(
-        currentWordIndex + nearSkipLimit,
-        visibleEndIndex - nearRequiredSequence + 1
-    );
-
-    // Сначала проверяем ближнюю зону (до 5 слов вперед)
-    for (let checkIndex = nearStart; checkIndex <= nearEnd; checkIndex++) {
-        const matched = hasSequenceMatch(
-            spokenWords,
-            checkIndex,
-            nearRequiredSequence,
-            isMatch
-        );
-
-        if (!matched) continue;
-
-        const lastMatchedIndex = checkIndex + nearRequiredSequence - 1;
-        currentWordIndex = checkIndex + nearRequiredSequence;
-        highlightWord(lastMatchedIndex);
-        performScroll(lastMatchedIndex);
-        return;
-    }
-
-    // Если пропуск больше 5 слов, разрешаем переход ТОЛЬКО при 5 строгих совпадениях подряд
-    const farStart = currentWordIndex + nearSkipLimit + 1;
-    const farEnd = visibleEndIndex - farRequiredSequence + 1;
-
-    for (let checkIndex = farStart; checkIndex <= farEnd; checkIndex++) {
-        const matched = hasSequenceMatch(
-            spokenWords,
-            checkIndex,
-            farRequiredSequence,
-            isStrictMatch
-        );
-
-        if (!matched) continue;
-
-        const lastMatchedIndex = checkIndex + farRequiredSequence - 1;
-        currentWordIndex = checkIndex + farRequiredSequence;
-        highlightWord(lastMatchedIndex);
-        performScroll(lastMatchedIndex);
-        return;
-    }
-}
-
-function hasSequenceMatch(spokenWords, scriptStartIndex, sequenceLength, comparator) {
-    if (spokenWords.length < sequenceLength) return false;
-
-    for (let spokenStart = 0; spokenStart <= spokenWords.length - sequenceLength; spokenStart++) {
-        let ok = true;
-
-        for (let offset = 0; offset < sequenceLength; offset++) {
-            const spokenWord = spokenWords[spokenStart + offset];
-            const scriptWord = scriptWords[scriptStartIndex + offset].clean;
-
-            if (!comparator(spokenWord, scriptWord)) {
-                ok = false;
-                break;
-            }
-        }
-
-        if (ok) return true;
-    }
-
-    return false;
 }
 
 // Простая функция сравнения
@@ -308,12 +248,6 @@ function isMatch(spoken, script) {
     }
     
     return false;
-}
-
-// Строгое сравнение: только полное совпадение
-function isStrictMatch(spoken, script) {
-    if (!spoken || !script) return false;
-    return spoken === script;
 }
 
 // --- 5. Логика Визуала и Скролла ---
