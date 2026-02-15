@@ -3,6 +3,7 @@ let recognition; // Объект распознавания речи
 let isListening = false; // Флаг: включен ли микрофон
 let scriptWords = []; // Массив объектов слов (текст, очищенный текст, HTML-элемент)
 let currentWordIndex = 0; // На каком слове мы сейчас находимся
+let lastProcessedTranscript = ''; // Защита от повторной обработки одинакового interim-текста
 
 // --- Получаем элементы со страницы ---
 const setupScreen = document.getElementById('setup-screen');
@@ -102,6 +103,7 @@ function processText(rawText) {
     contentDisplay.innerHTML = ''; // Очистить старое
     scriptWords = [];
     currentWordIndex = 0;
+    lastProcessedTranscript = '';
 
     // Разбиваем текст на слова по пробелам и переносам строк
     const words = rawText.split(/\s+/);
@@ -131,6 +133,7 @@ function processText(rawText) {
 function startListening() {
     if (!recognition) return;
     try {
+        lastProcessedTranscript = '';
         recognition.start();
         isListening = true;
         updateMicVisuals(true);
@@ -160,64 +163,94 @@ function updateMicVisuals(active) {
 function handleSpeechResult(event) {
     // Берем последний результат
     const lastResultIndex = event.results.length - 1;
-    const transcript = event.results[lastResultIndex][0].transcript;
+    const result = event.results[lastResultIndex];
+    const transcript = result[0].transcript;
+
+    const transcriptKey = transcript.toLowerCase().trim();
+    if (!transcriptKey) return;
+
+    // Не обрабатываем один и тот же промежуточный текст повторно
+    if (!result.isFinal && transcriptKey === lastProcessedTranscript) {
+        return;
+    }
+    lastProcessedTranscript = transcriptKey;
 
     // Нормализуем услышанные слова
-    const spokenWords = transcript
-        .toLowerCase()
-        .trim()
+    const spokenWords = transcriptKey
         .split(/\s+/)
         .map((word) => word.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, ""))
         .filter(Boolean);
 
-    // Новое правило: двигаемся только если совпали минимум 4 слова подряд
-    const requiredSequence = 4;
-    const lookAheadRange = 6; // Небольшое окно вперед для устойчивости
+    // Режимы:
+    // 1) До 5 слов пропуска: нужно 4 подряд (мягкое сравнение)
+    // 2) Пропуск больше 5 слов: только 5 подряд (строгое сравнение)
+    const nearSkipLimit = 5;
+    const nearRequiredSequence = 4;
+    const farRequiredSequence = 5;
 
-    if (spokenWords.length < requiredSequence) {
-        return; // Сказано меньше 4 слов — ничего не двигаем
+    const nearStart = currentWordIndex;
+    const nearEnd = Math.min(currentWordIndex + nearSkipLimit, scriptWords.length - nearRequiredSequence);
+
+    // Сначала проверяем ближнюю зону (до 5 слов вперед)
+    for (let checkIndex = nearStart; checkIndex <= nearEnd; checkIndex++) {
+        const matched = hasSequenceMatch(
+            spokenWords,
+            checkIndex,
+            nearRequiredSequence,
+            isMatch
+        );
+
+        if (!matched) continue;
+
+        const lastMatchedIndex = checkIndex + nearRequiredSequence - 1;
+        currentWordIndex = checkIndex + nearRequiredSequence;
+        highlightWord(lastMatchedIndex);
+        performScroll(lastMatchedIndex);
+        return;
     }
 
-    const maxScriptStart = Math.min(
-        currentWordIndex + lookAheadRange,
-        scriptWords.length - requiredSequence
-    );
+    // Если пропуск больше 5 слов, разрешаем переход ТОЛЬКО при 5 строгих совпадениях подряд
+    const farStart = currentWordIndex + nearSkipLimit + 1;
+    const farEnd = scriptWords.length - farRequiredSequence;
 
-    for (let checkIndex = currentWordIndex; checkIndex <= maxScriptStart; checkIndex++) {
-        let hasSequenceMatch = false;
+    for (let checkIndex = farStart; checkIndex <= farEnd; checkIndex++) {
+        const matched = hasSequenceMatch(
+            spokenWords,
+            checkIndex,
+            farRequiredSequence,
+            isStrictMatch
+        );
 
-        // Внутри услышанной фразы ищем окно из 4 слов,
-        // которое совпадает с 4 словами сценария подряд
-        for (let spokenStart = 0; spokenStart <= spokenWords.length - requiredSequence; spokenStart++) {
-            hasSequenceMatch = true;
+        if (!matched) continue;
 
-            for (let offset = 0; offset < requiredSequence; offset++) {
-                const spokenWord = spokenWords[spokenStart + offset];
-                const scriptWord = scriptWords[checkIndex + offset].clean;
+        const lastMatchedIndex = checkIndex + farRequiredSequence - 1;
+        currentWordIndex = checkIndex + farRequiredSequence;
+        highlightWord(lastMatchedIndex);
+        performScroll(lastMatchedIndex);
+        return;
+    }
+}
 
-                if (!isMatch(spokenWord, scriptWord)) {
-                    hasSequenceMatch = false;
-                    break;
-                }
-            }
+function hasSequenceMatch(spokenWords, scriptStartIndex, sequenceLength, comparator) {
+    if (spokenWords.length < sequenceLength) return false;
 
-            if (hasSequenceMatch) {
+    for (let spokenStart = 0; spokenStart <= spokenWords.length - sequenceLength; spokenStart++) {
+        let ok = true;
+
+        for (let offset = 0; offset < sequenceLength; offset++) {
+            const spokenWord = spokenWords[spokenStart + offset];
+            const scriptWord = scriptWords[scriptStartIndex + offset].clean;
+
+            if (!comparator(spokenWord, scriptWord)) {
+                ok = false;
                 break;
             }
         }
 
-        if (!hasSequenceMatch) {
-            continue;
-        }
-
-        // Совпало 4 подряд: двигаем ровно на 4 слова вперед
-        const lastMatchedIndex = checkIndex + requiredSequence - 1;
-        currentWordIndex = checkIndex + requiredSequence;
-
-        highlightWord(lastMatchedIndex);
-        performScroll(lastMatchedIndex);
-        break;
+        if (ok) return true;
     }
+
+    return false;
 }
 
 // Простая функция сравнения
@@ -236,6 +269,12 @@ function isMatch(spoken, script) {
     }
     
     return false;
+}
+
+// Строгое сравнение: только полное совпадение
+function isStrictMatch(spoken, script) {
+    if (!spoken || !script) return false;
+    return spoken === script;
 }
 
 // --- 5. Логика Визуала и Скролла ---
