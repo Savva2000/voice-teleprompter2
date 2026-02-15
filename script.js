@@ -22,6 +22,14 @@ const inputFontFamily = document.getElementById('font-family');
 const inputTextColor = document.getElementById('text-color');
 const inputBgColor = document.getElementById('bg-color');
 const inputScrollOffset = document.getElementById('scroll-offset'); // Насколько заранее скроллить
+const limitSearchToggle = document.getElementById('limit-search-toggle');
+const maxVisibleWordsSelect = document.getElementById('max-visible-words');
+
+if (limitSearchToggle && maxVisibleWordsSelect) {
+    limitSearchToggle.addEventListener('change', () => {
+        maxVisibleWordsSelect.disabled = !limitSearchToggle.checked;
+    });
+}
 
 // --- 1. Инициализация Web Speech API ---
 // Проверяем, поддерживает ли браузер распознавание
@@ -188,8 +196,21 @@ function handleSpeechResult(event) {
     const nearRequiredSequence = 4;
     const farRequiredSequence = 5;
 
+    const isLimitedSearchEnabled = limitSearchToggle?.checked;
+    const maxVisibleWords = Math.max(1, parseInt(maxVisibleWordsSelect?.value, 10) || 10);
+    const visibleEndIndex = isLimitedSearchEnabled
+        ? Math.min(scriptWords.length - 1, currentWordIndex + maxVisibleWords)
+        : scriptWords.length - 1;
+
+    if (visibleEndIndex <= currentWordIndex) {
+        return;
+    }
+
     const nearStart = currentWordIndex;
-    const nearEnd = Math.min(currentWordIndex + nearSkipLimit, scriptWords.length - nearRequiredSequence);
+    const nearEnd = Math.min(
+        currentWordIndex + nearSkipLimit,
+        visibleEndIndex - nearRequiredSequence + 1
+    );
 
     // Сначала проверяем ближнюю зону (до 5 слов вперед)
     for (let checkIndex = nearStart; checkIndex <= nearEnd; checkIndex++) {
@@ -211,7 +232,7 @@ function handleSpeechResult(event) {
 
     // Если пропуск больше 5 слов, разрешаем переход ТОЛЬКО при 5 строгих совпадениях подряд
     const farStart = currentWordIndex + nearSkipLimit + 1;
-    const farEnd = scriptWords.length - farRequiredSequence;
+    const farEnd = visibleEndIndex - farRequiredSequence + 1;
 
     for (let checkIndex = farStart; checkIndex <= farEnd; checkIndex++) {
         const matched = hasSequenceMatch(
