@@ -25,6 +25,7 @@ const inputBgColor = document.getElementById('bg-color');
 const inputScrollOffset = document.getElementById('scroll-offset'); // Насколько заранее скроллить
 const limitSearchToggle = document.getElementById('limit-search-toggle');
 const maxVisibleWordsSelect = document.getElementById('max-visible-words');
+const voiceJumpToggle = document.getElementById('voice-jump-toggle');
 
 if (limitSearchToggle && maxVisibleWordsSelect) {
     limitSearchToggle.addEventListener('change', () => {
@@ -178,7 +179,21 @@ function handleSpeechResult(event) {
     const transcript = result[0].transcript;
 
     const transcriptKey = transcript.toLowerCase().trim();
+    const normalizedTranscript = transcriptKey.replace(/\s+/g, ' ');
     if (!transcriptKey) return;
+
+    // Голосовые команды переноса вверх (включаются чекбоксом в настройках)
+    if (voiceJumpToggle?.checked) {
+        if (normalizedTranscript.includes('перенос десять')) {
+            jumpUpByWords(10);
+            return;
+        }
+
+        if (normalizedTranscript.includes('перенос пять')) {
+            jumpUpByWords(5);
+            return;
+        }
+    }
 
     // Не обрабатываем один и тот же промежуточный текст повторно
     if (!result.isFinal && transcriptKey === lastProcessedTranscript) {
@@ -200,6 +215,10 @@ function handleSpeechResult(event) {
     let visibleEndIndex = scriptWords.length - 1;
 
     if (isLimitedSearchEnabled) {
+        if (currentWordIndex < windowStartIndex) {
+            windowStartIndex = Math.max(0, currentWordIndex - shiftThreshold);
+        }
+
         // Скользящее окно: например видим 20 слов, после прохождения 10 слов окно сдвигается
         while (currentWordIndex - windowStartIndex >= shiftThreshold) {
             windowStartIndex += shiftThreshold;
@@ -230,6 +249,58 @@ function handleSpeechResult(event) {
             return;
         }
     }
+
+    // Если в уже пройденной части нашли 4 подряд совпавших слова,
+    // считаем, что пользователь вернулся к прошлому месту текста.
+    const backwardSequenceLength = 4;
+    const backwardMatchStart = findBackwardSequenceMatch(spokenWords, backwardSequenceLength);
+
+    if (backwardMatchStart !== -1) {
+        const lastMatchedIndex = backwardMatchStart + backwardSequenceLength - 1;
+        currentWordIndex = backwardMatchStart + backwardSequenceLength;
+        highlightWord(lastMatchedIndex);
+        performScroll(lastMatchedIndex);
+    }
+}
+
+function jumpUpByWords(wordsToJump) {
+    if (!scriptWords.length) return;
+
+    const targetIndex = Math.max(0, currentWordIndex - wordsToJump);
+    currentWordIndex = targetIndex;
+
+    if (currentWordIndex > 0) {
+        highlightWord(currentWordIndex - 1);
+        performScroll(currentWordIndex - 1);
+    } else {
+        highlightWord(0);
+        performScroll(0);
+    }
+}
+
+function findBackwardSequenceMatch(spokenWords, sequenceLength) {
+    if (spokenWords.length < sequenceLength) return -1;
+    if (currentWordIndex < sequenceLength) return -1;
+
+    for (let scriptStart = currentWordIndex - sequenceLength; scriptStart >= 0; scriptStart--) {
+        for (let spokenStart = 0; spokenStart <= spokenWords.length - sequenceLength; spokenStart++) {
+            let ok = true;
+
+            for (let offset = 0; offset < sequenceLength; offset++) {
+                const spokenWord = spokenWords[spokenStart + offset];
+                const scriptWord = scriptWords[scriptStart + offset].clean;
+
+                if (!isMatch(spokenWord, scriptWord)) {
+                    ok = false;
+                    break;
+                }
+            }
+
+            if (ok) return scriptStart;
+        }
+    }
+
+    return -1;
 }
 
 // Простая функция сравнения
