@@ -6,6 +6,7 @@ let currentWordIndex = 0; // На каком слове мы сейчас нах
 let lastProcessedTranscript = ''; // Защита от повторной обработки одинакового interim-текста
 let windowStartIndex = 0; // Начало "видимого" окна слов
 let lastVoiceCommandKey = ''; // Защита от многократного срабатывания одной и той же команды
+let statusResetTimer = null; // Таймер для временных диагностических сообщений
 
 // --- Получаем элементы со страницы ---
 const setupScreen = document.getElementById('setup-screen');
@@ -174,6 +175,15 @@ function updateMicVisuals(active) {
     }
 }
 
+function flashStatus(message, delay = 1400) {
+    statusText.textContent = message;
+    if (statusResetTimer) clearTimeout(statusResetTimer);
+
+    statusResetTimer = setTimeout(() => {
+        statusText.textContent = isListening ? "Слушаю..." : "Остановлено";
+    }, delay);
+}
+
 // Эта функция вызывается каждый раз, когда браузер слышит голос
 function handleSpeechResult(event) {
     // Берем последний результат
@@ -185,19 +195,25 @@ function handleSpeechResult(event) {
     const normalizedTranscript = transcriptKey.replace(/\s+/g, ' ');
     if (!transcriptKey) return;
 
+    const spokenWords = transcriptKey
+        .split(/\s+/)
+        .map((word) => word.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, ""))
+        .filter(Boolean);
+
     // Голосовые команды переноса вверх (включаются чекбоксом в настройках)
     if (voiceJumpToggle?.checked) {
-        const cleanCommandText = normalizedTranscript.replace(/[^a-zа-яё0-9\s]/gi, ' ');
-        const commandMatch = cleanCommandText.match(/\bперенос\s+(пять|5|десять|10)\b/i);
+        const cleanCommandText = normalizedTranscript.replace(/[^a-zа-яё0-9\s]/gi, ' ').replace(/\s+/g, ' ').trim();
+        const commandMatch = cleanCommandText.match(/\bперенос\b(?:\s+на)?\s*(пять|5|десять|10)\b/i);
 
         if (commandMatch) {
-            const commandValue = commandMatch[1];
+            const commandValue = commandMatch[1].toLowerCase();
             const jumpAmount = (commandValue === 'пять' || commandValue === '5') ? 5 : 10;
             const commandKey = `${jumpAmount}:${cleanCommandText}`;
 
             if (commandKey !== lastVoiceCommandKey) {
                 jumpUpByWords(jumpAmount);
                 lastVoiceCommandKey = commandKey;
+                flashStatus(`Команда: перенос ${jumpAmount}`);
             }
             return;
         }
@@ -212,12 +228,6 @@ function handleSpeechResult(event) {
     }
     lastProcessedTranscript = transcriptKey;
 
-    // Нормализуем услышанные слова
-    const spokenWords = transcriptKey
-        .split(/\s+/)
-        .map((word) => word.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, ""))
-        .filter(Boolean);
-
     // Сначала проверяем возврат в уже пройденный текст (4 подряд слова)
     // Важно: этот блок должен стоять РАНЬШЕ обычного следования вперед,
     // иначе локальный forward-match перехватывает управление и backward не срабатывает.
@@ -229,6 +239,7 @@ function handleSpeechResult(event) {
         currentWordIndex = backwardMatchStart + backwardSequenceLength;
         highlightWord(lastMatchedIndex);
         performScroll(lastMatchedIndex);
+        flashStatus(`Автопрыжок назад: ${backwardSequenceLength} слова`);
         return;
     }
 
@@ -275,6 +286,9 @@ function handleSpeechResult(event) {
         }
     }
 
+    // Диагностика: если ничего не поймали (временно, чтобы проверить баг)
+    // flashStatus("Совпадений нет", 800);
+
 }
 
 function jumpUpByWords(wordsToJump) {
@@ -282,6 +296,10 @@ function jumpUpByWords(wordsToJump) {
 
     const targetIndex = Math.max(0, currentWordIndex - wordsToJump);
     currentWordIndex = targetIndex;
+
+    if (windowStartIndex > currentWordIndex) {
+        windowStartIndex = currentWordIndex;
+    }
 
     if (currentWordIndex > 0) {
         highlightWord(currentWordIndex - 1);
