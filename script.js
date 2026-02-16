@@ -5,6 +5,7 @@ let scriptWords = []; // Массив объектов слов (текст, о�
 let currentWordIndex = 0; // На каком слове мы сейчас находимся
 let lastProcessedTranscript = ''; // Защита от повторной обработки одинакового interim-текста
 let windowStartIndex = 0; // Начало "видимого" окна слов
+let lastVoiceCommandKey = ''; // Защита от многократного срабатывания одной и той же команды
 
 // --- Получаем элементы со страницы ---
 const setupScreen = document.getElementById('setup-screen');
@@ -115,6 +116,7 @@ function processText(rawText) {
     currentWordIndex = 0;
     lastProcessedTranscript = '';
     windowStartIndex = 0;
+    lastVoiceCommandKey = '';
 
     // Разбиваем текст на слова по пробелам и переносам строк
     const words = rawText.split(/\s+/);
@@ -146,6 +148,7 @@ function startListening() {
     try {
         lastProcessedTranscript = '';
         windowStartIndex = 0;
+        lastVoiceCommandKey = '';
         recognition.start();
         isListening = true;
         updateMicVisuals(true);
@@ -184,16 +187,24 @@ function handleSpeechResult(event) {
 
     // Голосовые команды переноса вверх (включаются чекбоксом в настройках)
     if (voiceJumpToggle?.checked) {
-        if (normalizedTranscript.includes('перенос десять')) {
-            jumpUpByWords(10);
-            return;
-        }
+        const cleanCommandText = normalizedTranscript.replace(/[^a-zа-яё0-9\s]/gi, ' ');
+        const commandMatch = cleanCommandText.match(/\bперенос\s+(пять|5|десять|10)\b/i);
 
-        if (normalizedTranscript.includes('перенос пять')) {
-            jumpUpByWords(5);
+        if (commandMatch) {
+            const commandValue = commandMatch[1];
+            const jumpAmount = (commandValue === 'пять' || commandValue === '5') ? 5 : 10;
+            const commandKey = `${jumpAmount}:${cleanCommandText}`;
+
+            if (commandKey !== lastVoiceCommandKey) {
+                jumpUpByWords(jumpAmount);
+                lastVoiceCommandKey = commandKey;
+            }
             return;
         }
     }
+
+    // Если сейчас не команда — разрешаем следующую команду
+    lastVoiceCommandKey = '';
 
     // Не обрабатываем один и тот же промежуточный текст повторно
     if (!result.isFinal && transcriptKey === lastProcessedTranscript) {
@@ -206,6 +217,20 @@ function handleSpeechResult(event) {
         .split(/\s+/)
         .map((word) => word.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, ""))
         .filter(Boolean);
+
+    // Сначала проверяем возврат в уже пройденный текст (4 подряд слова)
+    // Важно: этот блок должен стоять РАНЬШЕ обычного следования вперед,
+    // иначе локальный forward-match перехватывает управление и backward не срабатывает.
+    const backwardSequenceLength = 4;
+    const backwardMatchStart = findBackwardSequenceMatch(spokenWords, backwardSequenceLength);
+
+    if (backwardMatchStart !== -1) {
+        const lastMatchedIndex = backwardMatchStart + backwardSequenceLength - 1;
+        currentWordIndex = backwardMatchStart + backwardSequenceLength;
+        highlightWord(lastMatchedIndex);
+        performScroll(lastMatchedIndex);
+        return;
+    }
 
     const isLimitedSearchEnabled = limitSearchToggle?.checked;
     const maxVisibleWords = Math.max(1, parseInt(maxVisibleWordsSelect?.value, 10) || 10);
@@ -250,17 +275,6 @@ function handleSpeechResult(event) {
         }
     }
 
-    // Если в уже пройденной части нашли 4 подряд совпавших слова,
-    // считаем, что пользователь вернулся к прошлому месту текста.
-    const backwardSequenceLength = 4;
-    const backwardMatchStart = findBackwardSequenceMatch(spokenWords, backwardSequenceLength);
-
-    if (backwardMatchStart !== -1) {
-        const lastMatchedIndex = backwardMatchStart + backwardSequenceLength - 1;
-        currentWordIndex = backwardMatchStart + backwardSequenceLength;
-        highlightWord(lastMatchedIndex);
-        performScroll(lastMatchedIndex);
-    }
 }
 
 function jumpUpByWords(wordsToJump) {
