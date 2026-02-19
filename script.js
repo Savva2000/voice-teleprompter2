@@ -3,9 +3,6 @@ let recognition; // Объект распознавания речи
 let isListening = false; // Флаг: включен ли микрофон
 let scriptWords = []; // Массив объектов слов (текст, очищенный текст, HTML-элемент)
 let currentWordIndex = 0; // На каком слове мы сейчас находимся
-let lastProcessedTranscript = ''; // Защита от повторной обработки одинакового interim-текста
-let windowStartIndex = 0; // Начало "видимого" окна слов
-let lastVoiceCommandKey = ''; // Защита от многократного срабатывания одной и той же команды
 
 // --- Получаем элементы со страницы ---
 const setupScreen = document.getElementById('setup-screen');
@@ -24,15 +21,6 @@ const inputFontFamily = document.getElementById('font-family');
 const inputTextColor = document.getElementById('text-color');
 const inputBgColor = document.getElementById('bg-color');
 const inputScrollOffset = document.getElementById('scroll-offset'); // Насколько заранее скроллить
-const limitSearchToggle = document.getElementById('limit-search-toggle');
-const maxVisibleWordsSelect = document.getElementById('max-visible-words');
-const voiceJumpToggle = document.getElementById('voice-jump-toggle');
-
-if (limitSearchToggle && maxVisibleWordsSelect) {
-    limitSearchToggle.addEventListener('change', () => {
-        maxVisibleWordsSelect.disabled = !limitSearchToggle.checked;
-    });
-}
 
 // --- 1. Инициализация Web Speech API ---
 // Проверяем, поддерживает ли браузер распознавание
@@ -114,9 +102,6 @@ function processText(rawText) {
     contentDisplay.innerHTML = ''; // Очистить старое
     scriptWords = [];
     currentWordIndex = 0;
-    lastProcessedTranscript = '';
-    windowStartIndex = 0;
-    lastVoiceCommandKey = '';
 
     // Разбиваем текст на слова по пробелам и переносам строк
     const words = rawText.split(/\s+/);
@@ -146,9 +131,6 @@ function processText(rawText) {
 function startListening() {
     if (!recognition) return;
     try {
-        lastProcessedTranscript = '';
-        windowStartIndex = 0;
-        lastVoiceCommandKey = '';
         recognition.start();
         isListening = true;
         updateMicVisuals(true);
@@ -176,145 +158,49 @@ function updateMicVisuals(active) {
 
 // Эта функция вызывается каждый раз, когда браузер слышит голос
 function handleSpeechResult(event) {
-    // Берем последний результат
+    // Берем последний результат (массив слов)
     const lastResultIndex = event.results.length - 1;
-    const result = event.results[lastResultIndex];
-    const transcript = result[0].transcript;
+    const transcript = event.results[lastResultIndex][0].transcript;
+    
+    // Превращаем то, что услышали, в массив слов
+    const spokenWords = transcript.toLowerCase().trim().split(/\s+/);
+    
+    // Берем последнее сказанное слово (оно самое актуальное)
+    const lastSpokenWord = spokenWords[spokenWords.length - 1];
 
-    const transcriptKey = transcript.toLowerCase().trim();
-    const normalizedTranscript = transcriptKey.replace(/\s+/g, ' ');
-    if (!transcriptKey) return;
+    console.log("Услышал:", lastSpokenWord); // Для отладки в консоли
 
-    // Голосовые команды переноса вверх (включаются чекбоксом в настройках)
-    if (voiceJumpToggle?.checked) {
-        const cleanCommandText = normalizedTranscript.replace(/[^a-zа-яё0-9\s]/gi, ' ');
-        const commandMatch = cleanCommandText.match(/\bперенос\s+(пять|5|десять|10)\b/i);
+    // --- АЛГОРИТМ ПОИСКА ---
+    // Мы не просто сравниваем с текущим словом. Мы смотрим на 3 слова вперед.
+    // Это нужно, если браузер пропустил слово или ошибся в окончании.
+    
+    const searchRange = 5; // Смотрим на 5 слов вперед от текущей позиции
+    
+    for (let i = 0; i < searchRange; i++) {
+        const checkIndex = currentWordIndex + i;
+        
+        // Проверка, не вышли ли за границы текста
+        if (checkIndex >= scriptWords.length) break;
 
-        if (commandMatch) {
-            const commandValue = commandMatch[1];
-            const jumpAmount = (commandValue === 'пять' || commandValue === '5') ? 5 : 10;
-            const commandKey = `${jumpAmount}:${cleanCommandText}`;
-
-            if (commandKey !== lastVoiceCommandKey) {
-                jumpUpByWords(jumpAmount);
-                lastVoiceCommandKey = commandKey;
-            }
-            return;
-        }
-    }
-
-    // Если сейчас не команда — разрешаем следующую команду
-    lastVoiceCommandKey = '';
-
-    // Не обрабатываем один и тот же промежуточный текст повторно
-    if (!result.isFinal && transcriptKey === lastProcessedTranscript) {
-        return;
-    }
-    lastProcessedTranscript = transcriptKey;
-
-    // Нормализуем услышанные слова
-    const spokenWords = transcriptKey
-        .split(/\s+/)
-        .map((word) => word.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, ""))
-        .filter(Boolean);
-
-    // Сначала проверяем возврат в уже пройденный текст (4 подряд слова)
-    // Важно: этот блок должен стоять РАНЬШЕ обычного следования вперед,
-    // иначе локальный forward-match перехватывает управление и backward не срабатывает.
-    const backwardSequenceLength = 4;
-    const backwardMatchStart = findBackwardSequenceMatch(spokenWords, backwardSequenceLength);
-
-    if (backwardMatchStart !== -1) {
-        const lastMatchedIndex = backwardMatchStart + backwardSequenceLength - 1;
-        currentWordIndex = backwardMatchStart + backwardSequenceLength;
-        highlightWord(lastMatchedIndex);
-        performScroll(lastMatchedIndex);
-        return;
-    }
-
-    const isLimitedSearchEnabled = limitSearchToggle?.checked;
-    const maxVisibleWords = Math.max(1, parseInt(maxVisibleWordsSelect?.value, 10) || 10);
-    const shiftThreshold = Math.max(1, Math.floor(maxVisibleWords / 2));
-
-    let visibleStartIndex = 0;
-    let visibleEndIndex = scriptWords.length - 1;
-
-    if (isLimitedSearchEnabled) {
-        if (currentWordIndex < windowStartIndex) {
-            windowStartIndex = Math.max(0, currentWordIndex - shiftThreshold);
-        }
-
-        // Скользящее окно: например видим 20 слов, после прохождения 10 слов окно сдвигается
-        while (currentWordIndex - windowStartIndex >= shiftThreshold) {
-            windowStartIndex += shiftThreshold;
-        }
-
-        visibleStartIndex = windowStartIndex;
-        visibleEndIndex = Math.min(scriptWords.length - 1, visibleStartIndex + maxVisibleWords - 1);
-    } else {
-        windowStartIndex = 0;
-    }
-
-    if (visibleEndIndex <= currentWordIndex) {
-        return;
-    }
-
-    const searchStart = Math.max(currentWordIndex, visibleStartIndex);
-
-    // Проверяем последние 3 услышанных слова — это дает быстрый отклик даже при промежуточных фразах
-    const spokenCandidates = spokenWords.slice(-3).reverse();
-
-    for (const spokenWord of spokenCandidates) {
-        for (let checkIndex = searchStart; checkIndex <= visibleEndIndex; checkIndex++) {
-            if (!isMatch(spokenWord, scriptWords[checkIndex].clean)) continue;
-
-            currentWordIndex = checkIndex + 1;
+        const scriptWordObj = scriptWords[checkIndex];
+        
+        // Сравнение (можно добавить нечеткий поиск тут, но пока точное совпадение начала)
+        // Используем startsWith, чтобы "привет" совпало с "приветик" (простая эвристика)
+        if (isMatch(lastSpokenWord, scriptWordObj.clean)) {
+            
+            // Если нашли совпадение:
+            // 1. Помечаем все слова до этого как прочитанные (серенькие) или просто снимаем выделение
             highlightWord(checkIndex);
+            
+            // 2. Обновляем текущий индекс
+            currentWordIndex = checkIndex + 1; // Ожидаем следующее слово
+            
+            // 3. СКРОЛЛИМ
             performScroll(checkIndex);
-            return;
+            
+            break; // Выходим из цикла, раз нашли слово
         }
     }
-
-}
-
-function jumpUpByWords(wordsToJump) {
-    if (!scriptWords.length) return;
-
-    const targetIndex = Math.max(0, currentWordIndex - wordsToJump);
-    currentWordIndex = targetIndex;
-
-    if (currentWordIndex > 0) {
-        highlightWord(currentWordIndex - 1);
-        performScroll(currentWordIndex - 1);
-    } else {
-        highlightWord(0);
-        performScroll(0);
-    }
-}
-
-function findBackwardSequenceMatch(spokenWords, sequenceLength) {
-    if (spokenWords.length < sequenceLength) return -1;
-    if (currentWordIndex < sequenceLength) return -1;
-
-    for (let scriptStart = currentWordIndex - sequenceLength; scriptStart >= 0; scriptStart--) {
-        for (let spokenStart = 0; spokenStart <= spokenWords.length - sequenceLength; spokenStart++) {
-            let ok = true;
-
-            for (let offset = 0; offset < sequenceLength; offset++) {
-                const spokenWord = spokenWords[spokenStart + offset];
-                const scriptWord = scriptWords[scriptStart + offset].clean;
-
-                if (!isMatch(spokenWord, scriptWord)) {
-                    ok = false;
-                    break;
-                }
-            }
-
-            if (ok) return scriptStart;
-        }
-    }
-
-    return -1;
 }
 
 // Простая функция сравнения
@@ -367,4 +253,5 @@ function performScroll(index) {
         behavior: 'smooth',
         block: 'center', // Стараться держать слово по центру
     });
+
 }
