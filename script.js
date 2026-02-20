@@ -3,7 +3,7 @@ let recognition; // Объект распознавания речи
 let isListening = false; // Флаг: включен ли микрофон
 let scriptWords = []; // Массив объектов слов (текст, очищенный текст, HTML-элемент)
 let currentWordIndex = 0; // На каком слове мы сейчас находимся
-let lastProcessedTranscript = ''; // Защита от повторной обработки одинакового interim-текста
+let lastSpeechSnapshotKey = ''; // Защита от повторной обработки одинакового снимка речи
 let windowStartIndex = 0; // Начало "видимого" окна слов
 let lastVoiceCommandKey = ''; // Защита от многократного срабатывания одной и той же команды
 let statusResetTimer = null; // Таймер для временных диагностических сообщений
@@ -115,7 +115,7 @@ function processText(rawText) {
     contentDisplay.innerHTML = ''; // Очистить старое
     scriptWords = [];
     currentWordIndex = 0;
-    lastProcessedTranscript = '';
+    lastSpeechSnapshotKey = '';
     windowStartIndex = 0;
     lastVoiceCommandKey = '';
 
@@ -147,7 +147,7 @@ function processText(rawText) {
 function startListening() {
     if (!recognition) return;
     try {
-        lastProcessedTranscript = '';
+        lastSpeechSnapshotKey = '';
         windowStartIndex = 0;
         lastVoiceCommandKey = '';
         recognition.start();
@@ -184,21 +184,59 @@ function flashStatus(message, delay = 1400) {
     }, delay);
 }
 
+function normalizeWord(word) {
+    return (word || '')
+        .toLowerCase()
+        .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()«»"“”„…?!]/g, "")
+        .trim();
+}
+
+function tokenizeTranscript(text) {
+    return (text || '')
+        .toLowerCase()
+        .split(/\s+/)
+        .map(normalizeWord)
+        .filter(Boolean);
+}
+
+function getSpeechSnapshot(event) {
+    const finalParts = [];
+    const interimParts = [];
+
+    for (let i = 0; i < event.results.length; i++) {
+        const result = event.results[i];
+        const transcript = result?.[0]?.transcript || '';
+
+        if (result.isFinal) {
+            finalParts.push(transcript);
+        } else {
+            interimParts.push(transcript);
+        }
+    }
+
+    const finalText = finalParts.join(' ').trim();
+    const interimText = interimParts.join(' ').trim();
+    const fullText = `${finalText} ${interimText}`.trim();
+
+    return {
+        finalText,
+        interimText,
+        fullText,
+        words: tokenizeTranscript(fullText)
+    };
+}
+
 // Эта функция вызывается каждый раз, когда браузер слышит голос
 function handleSpeechResult(event) {
-    // Берем последний результат
-    const lastResultIndex = event.results.length - 1;
-    const result = event.results[lastResultIndex];
-    const transcript = result[0].transcript;
+    const speechSnapshot = getSpeechSnapshot(event);
+    const normalizedTranscript = speechSnapshot.fullText.replace(/\s+/g, ' ').trim();
+    const spokenWords = speechSnapshot.words;
 
-    const transcriptKey = transcript.toLowerCase().trim();
-    const normalizedTranscript = transcriptKey.replace(/\s+/g, ' ');
-    if (!transcriptKey) return;
+    if (!normalizedTranscript || !spokenWords.length) return;
 
-    const spokenWords = transcriptKey
-        .split(/\s+/)
-        .map((word) => word.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, ""))
-        .filter(Boolean);
+    // Защита от повторной обработки одинакового снимка речи
+    if (normalizedTranscript === lastSpeechSnapshotKey) return;
+    lastSpeechSnapshotKey = normalizedTranscript;
 
     // Голосовые команды переноса вверх (включаются чекбоксом в настройках)
     if (voiceJumpToggle?.checked) {
@@ -221,12 +259,6 @@ function handleSpeechResult(event) {
 
     // Если сейчас не команда — разрешаем следующую команду
     lastVoiceCommandKey = '';
-
-    // Не обрабатываем один и тот же промежуточный текст повторно
-    if (!result.isFinal && transcriptKey === lastProcessedTranscript) {
-        return;
-    }
-    lastProcessedTranscript = transcriptKey;
 
     // Сначала проверяем возврат в уже пройденный текст (4 подряд слова)
     // Важно: этот блок должен стоять РАНЬШЕ обычного следования вперед,
@@ -266,29 +298,78 @@ function handleSpeechResult(event) {
         windowStartIndex = 0;
     }
 
-    if (visibleEndIndex <= currentWordIndex) {
+    if (currentWordIndex >= scriptWords.length) {
         return;
     }
 
     const searchStart = Math.max(currentWordIndex, visibleStartIndex);
 
-    // Проверяем последние 3 услышанных слова — это дает быстрый отклик даже при промежуточных фразах
-    const spokenCandidates = spokenWords.slice(-3).reverse();
+    const localMatch = findForwardSequenceMatch(spokenWords, searchStart, visibleEndIndex, [3, 2]);
+    if (localMatch) {
+        applyForwardMatch(localMatch.startIndex, localMatch.length);
+        return;
+    }
 
-    for (const spokenWord of spokenCandidates) {
+    // Мягкий fallback в окне: одно длинное слово (чтобы не цепляться за "и", "в", "на")
+    const singleWordCandidates = spokenWords.slice(-3).reverse().filter((word) => word.length >= 4);
+    for (const spokenWord of singleWordCandidates) {
         for (let checkIndex = searchStart; checkIndex <= visibleEndIndex; checkIndex++) {
             if (!isMatch(spokenWord, scriptWords[checkIndex].clean)) continue;
-
-            currentWordIndex = checkIndex + 1;
-            highlightWord(checkIndex);
-            performScroll(checkIndex);
+            applyForwardMatch(checkIndex, 1);
             return;
         }
     }
 
-    // Диагностика: если ничего не поймали (временно, чтобы проверить баг)
-    // flashStatus("Совпадений нет", 800);
+    // Расширенная пересинхронизация, если локально не нашли
+    const globalStart = Math.max(0, currentWordIndex - 40);
+    const globalEnd = Math.min(scriptWords.length - 1, currentWordIndex + 220);
+    const resyncMatch = findForwardSequenceMatch(spokenWords, globalStart, globalEnd, [3, 2]);
 
+    if (resyncMatch) {
+        applyForwardMatch(resyncMatch.startIndex, resyncMatch.length);
+        flashStatus('Пересинхронизация');
+    }
+
+}
+
+function applyForwardMatch(matchStartIndex, sequenceLength) {
+    const lastMatchedIndex = matchStartIndex + sequenceLength - 1;
+    currentWordIndex = lastMatchedIndex + 1;
+    highlightWord(lastMatchedIndex);
+    performScroll(lastMatchedIndex);
+}
+
+function findForwardSequenceMatch(spokenWords, searchStart, searchEnd, sequenceLengths = [3, 2]) {
+    if (!spokenWords.length || searchStart > searchEnd) return null;
+
+    for (const sequenceLength of sequenceLengths) {
+        if (spokenWords.length < sequenceLength) continue;
+
+        for (let spokenStart = spokenWords.length - sequenceLength; spokenStart >= 0; spokenStart--) {
+            for (let scriptStart = searchStart; scriptStart <= searchEnd - sequenceLength + 1; scriptStart++) {
+                let ok = true;
+
+                for (let offset = 0; offset < sequenceLength; offset++) {
+                    const spokenWord = spokenWords[spokenStart + offset];
+                    const scriptWord = scriptWords[scriptStart + offset]?.clean;
+
+                    if (!isMatch(spokenWord, scriptWord)) {
+                        ok = false;
+                        break;
+                    }
+                }
+
+                if (ok) {
+                    return {
+                        startIndex: scriptStart,
+                        length: sequenceLength
+                    };
+                }
+            }
+        }
+    }
+
+    return null;
 }
 
 function jumpUpByWords(wordsToJump) {
