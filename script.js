@@ -1,469 +1,297 @@
-// --- Глобальные переменные ---
-let recognition; // Объект распознавания речи
-let isListening = false; // Флаг: включен ли микрофон
-let scriptWords = []; // Массив объектов слов (текст, очищенный текст, HTML-элемент)
-let currentWordIndex = 0; // На каком слове мы сейчас находимся
-let lastSpeechSnapshotKey = ''; // Защита от повторной обработки одинакового снимка речи
-let windowStartIndex = 0; // Начало "видимого" окна слов
-let lastVoiceCommandKey = ''; // Защита от многократного срабатывания одной и той же команды
-let statusResetTimer = null; // Таймер для временных диагностических сообщений
+// --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
+let recognition;
+let isListening = false;
+let scriptWords = [];
+let currentWordIndex = 0;
 
-// --- Получаем элементы со страницы ---
+// Переменные для видео
+let mediaRecorder;
+let recordedChunks = [];
+let isRecording = false;
+let cameraStream = null;
+let selectedMimeType = '';
+
+// --- ЭЛЕМЕНТЫ DOM ---
 const setupScreen = document.getElementById('setup-screen');
 const prompterScreen = document.getElementById('prompter-screen');
 const contentDisplay = document.getElementById('content-display');
-
+const cameraPreview = document.getElementById('camera-preview');
 const sourceTextInput = document.getElementById('source-text');
 const btnStart = document.getElementById('btn-start');
 const btnBack = document.getElementById('btn-back');
 const btnMic = document.getElementById('btn-mic');
+const btnRecord = document.getElementById('btn-record');
 const statusText = document.getElementById('status-indicator');
-
-// Настройки
 const inputFontSize = document.getElementById('font-size');
-const inputFontFamily = document.getElementById('font-family');
-const inputTextColor = document.getElementById('text-color');
-const inputBgColor = document.getElementById('bg-color');
-const inputScrollOffset = document.getElementById('scroll-offset'); // Насколько заранее скроллить
-const limitSearchToggle = document.getElementById('limit-search-toggle');
-const maxVisibleWordsSelect = document.getElementById('max-visible-words');
-const voiceJumpToggle = document.getElementById('voice-jump-toggle');
+const inputScrollOffset = document.getElementById('scroll-offset');
+const checkboxCamera = document.getElementById('camera-toggle');
 
-if (limitSearchToggle && maxVisibleWordsSelect) {
-    limitSearchToggle.addEventListener('change', () => {
-        maxVisibleWordsSelect.disabled = !limitSearchToggle.checked;
-    });
-}
-
-// --- 1. Инициализация Web Speech API ---
-// Проверяем, поддерживает ли браузер распознавание
+// --- 1. НАСТРОЙКА ГОЛОСОВОГО ДВИЖКА ---
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-if (!SpeechRecognition) {
-    alert("Ваш браузер не поддерживает распознавание речи. Пожалуйста, используйте Google Chrome (на Android или ПК) или Safari.");
-    btnStart.disabled = true;
-    btnStart.textContent = "Браузер не поддерживается :(";
-} else {
+if (SpeechRecognition) {
     recognition = new SpeechRecognition();
-    recognition.lang = 'ru-RU'; // Язык - Русский
-    recognition.continuous = true; // Не останавливаться после одной фразы
-    recognition.interimResults = true; // Покзывать промежуточные результаты (быстро)
-    
-    // Привязываем события распознавания
+    recognition.lang = 'ru-RU';
+    recognition.continuous = true;
+    recognition.interimResults = true;
     recognition.onresult = handleSpeechResult;
-    recognition.onend = () => {
-        // Если распознавание само отключилось (бывает в тишине), но мы не жали стоп - перезапускаем
-        if (isListening) {
-            try { recognition.start(); } catch(e) {}
-        } else {
-            updateMicVisuals(false);
-        }
+    
+    // Автоперезапуск, если браузер решил остановить слух
+    recognition.onend = () => { 
+        if (isListening) try { recognition.start(); } catch(e){} 
+        else updateMicVisuals(false); 
     };
-    recognition.onerror = (event) => {
-        console.error("Ошибка речи:", event.error);
-        statusText.textContent = "Ошибка: " + event.error;
-    };
+    recognition.onerror = (e) => { console.error("Speech API Error:", e); };
+} else {
+    alert("Ваш браузер не поддерживает Speech API. Используйте Chrome или Safari.");
 }
 
-// --- 2. Обработка Кнопок ---
-
-// Кнопка "ЗАПУСТИТЬ" (Переход к суфлеру)
-btnStart.addEventListener('click', () => {
+// --- 2. ОБРАБОТЧИКИ КНОПОК ---
+btnStart.addEventListener('click', async () => {
     const text = sourceTextInput.value.trim();
-    if (!text) {
-        alert("Пожалуйста, введите текст сценария!");
-        return;
-    }
-
-    // Применяем настройки стиля
-    applySettings();
-
-    // Готовим текст (разбиваем на слова и создаем HTML)
+    if (!text) return alert("Введите текст!");
+    
+    // Применяем настройки
+    contentDisplay.style.fontSize = inputFontSize.value + 'px';
     processText(text);
 
-    // Переключаем экраны
+    // Логика камеры
+    if (checkboxCamera.checked) {
+        if (!await startCamera()) return;
+        btnRecord.classList.remove('hidden');
+        cameraPreview.style.display = 'block';
+        contentDisplay.style.color = 'rgba(255,255,255,0.95)';
+    } else {
+        btnRecord.classList.add('hidden');
+        cameraPreview.style.display = 'none';
+        contentDisplay.style.color = '#fff';
+    }
+    
     setupScreen.classList.add('hidden');
     prompterScreen.classList.remove('hidden');
 });
 
-// Кнопка "Настройки" (Назад)
 btnBack.addEventListener('click', () => {
-    stopListening();
+    stopListening(); stopCamera(); stopRecording();
     prompterScreen.classList.add('hidden');
     setupScreen.classList.remove('hidden');
 });
 
-// Кнопка "Микрофон" (Старт/Стоп записи)
-btnMic.addEventListener('click', () => {
-    if (isListening) {
-        stopListening();
-    } else {
-        startListening();
-    }
-});
+btnMic.addEventListener('click', () => { isListening ? stopListening() : startListening(); });
+btnRecord.addEventListener('click', () => { isRecording ? stopRecording() : startRecording(); });
 
-// --- 3. Логика Подготовки Текста ---
-
-function applySettings() {
-    prompterScreen.style.backgroundColor = inputBgColor.value;
-    contentDisplay.style.color = inputTextColor.value;
-    contentDisplay.style.fontSize = inputFontSize.value + 'px';
-    contentDisplay.style.fontFamily = inputFontFamily.value;
-}
-
+// --- 3. ПОДГОТОВКА ТЕКСТА ---
 function processText(rawText) {
-    contentDisplay.innerHTML = ''; // Очистить старое
+    contentDisplay.innerHTML = '';
     scriptWords = [];
     currentWordIndex = 0;
-    lastSpeechSnapshotKey = '';
-    windowStartIndex = 0;
-    lastVoiceCommandKey = '';
+    
+    // Удаляем лишнее
+    if (rawText.includes("t.me/SPEKTR_SP")) {
+       rawText = rawText.replace(/Создано независимым разработчиком[\s\S]*некоммерческих целях/, "");
+    }
 
-    // Разбиваем текст на слова по пробелам и переносам строк
     const words = rawText.split(/\s+/);
-
     words.forEach((word, index) => {
-        // Создаем span для каждого слова
         const span = document.createElement('span');
-        span.textContent = word + ' '; // Добавляем пробел визуально
+        span.textContent = word + ' ';
         span.id = `word-${index}`;
-        
-        // Очищаем слово от знаков препинания для сравнения (Привет, -> привет)
-        const cleanWord = word.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
-        
-        // Сохраняем в массив данных
-        scriptWords.push({
-            element: span,
-            clean: cleanWord,
-            raw: word
-        });
-
+        // Чистим слово для сравнения
+        const clean = word.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
+        scriptWords.push({ element: span, clean: clean });
         contentDisplay.appendChild(span);
     });
 }
 
-// --- 4. Логика Распознавания (САМОЕ ВАЖНОЕ) ---
+// --- 4. ЯДРО: УМНЫЙ ПОИСК С ДИНАМИЧЕСКИМ ПОРОГОМ (FIXED) ---
 
-function startListening() {
-    if (!recognition) return;
-    try {
-        lastSpeechSnapshotKey = '';
-        windowStartIndex = 0;
-        lastVoiceCommandKey = '';
-        recognition.start();
-        isListening = true;
-        updateMicVisuals(true);
-    } catch (e) {
-        console.log("Уже запущено");
-    }
-}
-
-function stopListening() {
-    if (!recognition) return;
-    recognition.stop();
-    isListening = false;
-    updateMicVisuals(false);
-}
-
-function updateMicVisuals(active) {
-    if (active) {
-        btnMic.classList.add('listening');
-        statusText.textContent = "Слушаю...";
-    } else {
-        btnMic.classList.remove('listening');
-        statusText.textContent = "Остановлено";
-    }
-}
-
-function flashStatus(message, delay = 1400) {
-    statusText.textContent = message;
-    if (statusResetTimer) clearTimeout(statusResetTimer);
-
-    statusResetTimer = setTimeout(() => {
-        statusText.textContent = isListening ? "Слушаю..." : "Остановлено";
-    }, delay);
-}
-
-function normalizeWord(word) {
-    return (word || '')
-        .toLowerCase()
-        .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()«»"“”„…?!]/g, "")
-        .trim();
-}
-
-function tokenizeTranscript(text) {
-    return (text || '')
-        .toLowerCase()
-        .split(/\s+/)
-        .map(normalizeWord)
-        .filter(Boolean);
-}
-
-function getSpeechSnapshot(event) {
-    const finalParts = [];
-    const interimParts = [];
-
-    for (let i = 0; i < event.results.length; i++) {
-        const result = event.results[i];
-        const transcript = result?.[0]?.transcript || '';
-
-        if (result.isFinal) {
-            finalParts.push(transcript);
-        } else {
-            interimParts.push(transcript);
-        }
-    }
-
-    const finalText = finalParts.join(' ').trim();
-    const interimText = interimParts.join(' ').trim();
-    const fullText = `${finalText} ${interimText}`.trim();
-
-    return {
-        finalText,
-        interimText,
-        fullText,
-        words: tokenizeTranscript(fullText)
-    };
-}
-
-// Эта функция вызывается каждый раз, когда браузер слышит голос
 function handleSpeechResult(event) {
-    const speechSnapshot = getSpeechSnapshot(event);
-    const normalizedTranscript = speechSnapshot.fullText.replace(/\s+/g, ' ').trim();
-    const spokenWords = speechSnapshot.words;
+    // Получаем полный транскрипт текущей сессии
+    const transcript = event.results[event.results.length - 1][0].transcript;
+    // Разбиваем на массив слов
+    const spokenWords = transcript.toLowerCase().trim().split(/\s+/);
+    
+    if (spokenWords.length === 0) return;
 
-    if (!normalizedTranscript || !spokenWords.length) return;
+    // --- НАСТРОЙКИ АЛГОРИТМА ---
+    const searchBack = 30;     // Смотрим назад на 30 слов
+    const searchForward = 800; // Смотрим вперед на 800 слов
 
-    // Защита от повторной обработки одинакового снимка речи
-    if (normalizedTranscript === lastSpeechSnapshotKey) return;
-    lastSpeechSnapshotKey = normalizedTranscript;
+    let startIndex = Math.max(0, currentWordIndex - searchBack);
+    let endIndex = Math.min(scriptWords.length, currentWordIndex + searchForward);
 
-    // Голосовые команды переноса вверх (включаются чекбоксом в настройках)
-    if (voiceJumpToggle?.checked) {
-        const cleanCommandText = normalizedTranscript.replace(/[^a-zа-яё0-9\s]/gi, ' ').replace(/\s+/g, ' ').trim();
-        const commandMatch = cleanCommandText.match(/\bперенос\b(?:\s+на)?\s*(пять|5|десять|10)\b/i);
+    let bestCandidate = null;
 
-        if (commandMatch) {
-            const commandValue = commandMatch[1].toLowerCase();
-            const jumpAmount = (commandValue === 'пять' || commandValue === '5') ? 5 : 10;
-            const commandKey = `${jumpAmount}:${cleanCommandText}`;
+    // Ищем ВСЕ возможные совпадения в диапазоне
+    for (let i = startIndex; i < endIndex; i++) {
+        const scriptWord = scriptWords[i].clean;
+        const lastSpoken = spokenWords[spokenWords.length - 1];
 
-            if (commandKey !== lastVoiceCommandKey) {
-                jumpUpByWords(jumpAmount);
-                lastVoiceCommandKey = commandKey;
-                flashStatus(`Команда: перенос ${jumpAmount}`);
-            }
-            return;
-        }
-    }
+        // 1. Проверяем совпадение последнего сказанного слова
+        if (isMatch(lastSpoken, scriptWord)) {
+            
+            // 2. Считаем длину совпавшей цепочки (сколько слов совпало подряд назад)
+            const sequenceLength = calculateSequenceMatch(i, spokenWords);
 
-    // Если сейчас не команда — разрешаем следующую команду
-    lastVoiceCommandKey = '';
+            // 3. Вычисляем "Цену прыжка" (Dynamic Threshold)
+            const distance = i - currentWordIndex;
+            const requiredLength = getRequiredThreshold(distance);
 
-    // Сначала проверяем возврат в уже пройденный текст (4 подряд слова)
-    // Важно: этот блок должен стоять РАНЬШЕ обычного следования вперед,
-    // иначе локальный forward-match перехватывает управление и backward не срабатывает.
-    const backwardSequenceLength = 4;
-    const backwardMatchStart = findBackwardSequenceMatch(spokenWords, backwardSequenceLength);
-
-    if (backwardMatchStart !== -1) {
-        const lastMatchedIndex = backwardMatchStart + backwardSequenceLength - 1;
-        currentWordIndex = backwardMatchStart + backwardSequenceLength;
-        highlightWord(lastMatchedIndex);
-        performScroll(lastMatchedIndex);
-        flashStatus(`Автопрыжок назад: ${backwardSequenceLength} слова`);
-        return;
-    }
-
-    const isLimitedSearchEnabled = limitSearchToggle?.checked;
-    const maxVisibleWords = Math.max(1, parseInt(maxVisibleWordsSelect?.value, 10) || 10);
-    const shiftThreshold = Math.max(1, Math.floor(maxVisibleWords / 2));
-
-    let visibleStartIndex = 0;
-    let visibleEndIndex = scriptWords.length - 1;
-
-    if (isLimitedSearchEnabled) {
-        if (currentWordIndex < windowStartIndex) {
-            windowStartIndex = Math.max(0, currentWordIndex - shiftThreshold);
-        }
-
-        // Скользящее окно: например видим 20 слов, после прохождения 10 слов окно сдвигается
-        while (currentWordIndex - windowStartIndex >= shiftThreshold) {
-            windowStartIndex += shiftThreshold;
-        }
-
-        visibleStartIndex = windowStartIndex;
-        visibleEndIndex = Math.min(scriptWords.length - 1, visibleStartIndex + maxVisibleWords - 1);
-    } else {
-        windowStartIndex = 0;
-    }
-
-    if (currentWordIndex >= scriptWords.length) {
-        return;
-    }
-
-    const searchStart = Math.max(currentWordIndex, visibleStartIndex);
-
-    const localMatch = findForwardSequenceMatch(spokenWords, searchStart, visibleEndIndex, [3, 2]);
-    if (localMatch) {
-        applyForwardMatch(localMatch.startIndex, localMatch.length);
-        return;
-    }
-
-    // Мягкий fallback в окне: одно длинное слово (чтобы не цепляться за "и", "в", "на")
-    const singleWordCandidates = spokenWords.slice(-3).reverse().filter((word) => word.length >= 4);
-    for (const spokenWord of singleWordCandidates) {
-        for (let checkIndex = searchStart; checkIndex <= visibleEndIndex; checkIndex++) {
-            if (!isMatch(spokenWord, scriptWords[checkIndex].clean)) continue;
-            applyForwardMatch(checkIndex, 1);
-            return;
-        }
-    }
-
-    // Расширенная пересинхронизация, если локально не нашли
-    const globalStart = Math.max(0, currentWordIndex - 40);
-    const globalEnd = Math.min(scriptWords.length - 1, currentWordIndex + 220);
-    const resyncMatch = findForwardSequenceMatch(spokenWords, globalStart, globalEnd, [3, 2]);
-
-    if (resyncMatch) {
-        applyForwardMatch(resyncMatch.startIndex, resyncMatch.length);
-        flashStatus('Пересинхронизация');
-    }
-
-}
-
-function applyForwardMatch(matchStartIndex, sequenceLength) {
-    const lastMatchedIndex = matchStartIndex + sequenceLength - 1;
-    currentWordIndex = lastMatchedIndex + 1;
-    highlightWord(lastMatchedIndex);
-    performScroll(lastMatchedIndex);
-}
-
-function findForwardSequenceMatch(spokenWords, searchStart, searchEnd, sequenceLengths = [3, 2]) {
-    if (!spokenWords.length || searchStart > searchEnd) return null;
-
-    for (const sequenceLength of sequenceLengths) {
-        if (spokenWords.length < sequenceLength) continue;
-
-        for (let spokenStart = spokenWords.length - sequenceLength; spokenStart >= 0; spokenStart--) {
-            for (let scriptStart = searchStart; scriptStart <= searchEnd - sequenceLength + 1; scriptStart++) {
-                let ok = true;
-
-                for (let offset = 0; offset < sequenceLength; offset++) {
-                    const spokenWord = spokenWords[spokenStart + offset];
-                    const scriptWord = scriptWords[scriptStart + offset]?.clean;
-
-                    if (!isMatch(spokenWord, scriptWord)) {
-                        ok = false;
-                        break;
-                    }
-                }
-
-                if (ok) {
-                    return {
-                        startIndex: scriptStart,
-                        length: sequenceLength
-                    };
+            // 4. Если совпадений достаточно для прыжка
+            if (sequenceLength >= requiredLength) {
+                
+                // 5. Выбираем ЛУЧШЕГО кандидата (Принцип Ближайшего Соседа)
+                // Если кандидата еще нет ИЛИ новый кандидат ближе к текущей позиции по модулю
+                if (!bestCandidate || Math.abs(distance) < Math.abs(bestCandidate.distance)) {
+                    bestCandidate = { index: i, distance: distance };
                 }
             }
         }
     }
 
-    return null;
-}
-
-function jumpUpByWords(wordsToJump) {
-    if (!scriptWords.length) return;
-
-    const targetIndex = Math.max(0, currentWordIndex - wordsToJump);
-    currentWordIndex = targetIndex;
-
-    if (windowStartIndex > currentWordIndex) {
-        windowStartIndex = currentWordIndex;
-    }
-
-    if (currentWordIndex > 0) {
-        highlightWord(currentWordIndex - 1);
-        performScroll(currentWordIndex - 1);
-    } else {
-        highlightWord(0);
-        performScroll(0);
+    // Если достойный кандидат найден — прыгаем
+    if (bestCandidate) {
+        jumpTo(bestCandidate.index);
     }
 }
 
-function findBackwardSequenceMatch(spokenWords, sequenceLength) {
-    if (spokenWords.length < sequenceLength) return -1;
-    if (currentWordIndex < sequenceLength) return -1;
+// Функция определения "Цены" прыжка
+function getRequiredThreshold(distance) {
+    // А. Если слово совсем рядом (0-10 слов вперед) -> Цена: 1 слово
+    if (distance >= 0 && distance < 10) return 1;
 
-    for (let scriptStart = currentWordIndex - sequenceLength; scriptStart >= 0; scriptStart--) {
-        for (let spokenStart = 0; spokenStart <= spokenWords.length - sequenceLength; spokenStart++) {
-            let ok = true;
+    // Б. Если слово чуть дальше (10-40 слов вперед) -> Цена: 2 слова
+    if (distance >= 10 && distance < 40) return 2;
 
-            for (let offset = 0; offset < sequenceLength; offset++) {
-                const spokenWord = spokenWords[spokenStart + offset];
-                const scriptWord = scriptWords[scriptStart + offset].clean;
+    // В. Если прыжок далеко (40+ слов) -> Цена: 3 слова (Ключ)
+    if (distance >= 40) return 3;
 
-                if (!isMatch(spokenWord, scriptWord)) {
-                    ok = false;
-                    break;
-                }
-            }
+    // Г. Если прыжок НАЗАД -> Цена: 4 слова (Защита от случайных возвратов)
+    if (distance < 0) return 4;
+    
+    return 3; // Дефолт
+}
 
-            if (ok) return scriptStart;
+// Функция подсчета реальных совпадений назад
+function calculateSequenceMatch(scriptIndex, spokenWords) {
+    let matches = 0;
+    // Сравниваем слова назад от текущей позиции
+    // k = смещение назад (0 = последнее слово, 1 = предпоследнее...)
+    for (let k = 0; k < 5; k++) { // Проверяем максимум 5 последних слов
+        const sIndex = scriptIndex - k;
+        const wIndex = spokenWords.length - 1 - k;
+
+        if (sIndex < 0 || wIndex < 0) break; // Вышли за границы
+
+        const scriptW = scriptWords[sIndex].clean;
+        // Очищаем сказанное слово от мусора
+        const spokenW = spokenWords[wIndex].replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
+
+        if (isMatch(spokenW, scriptW)) {
+            matches++;
+        } else {
+            break; // Цепочка прервалась
         }
     }
-
-    return -1;
+    return matches;
 }
 
-// Простая функция сравнения
 function isMatch(spoken, script) {
     if (!spoken || !script) return false;
-    // Убираем лишнее еще раз на всякий случай
-    spoken = spoken.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
-    
-    // 1. Точное совпадение
     if (spoken === script) return true;
     
-    // 2. Если слово длинное (>4 букв), разрешаем расхождение в окончаниях
-    // (Если в сценарии "делаешь", а сказал "делать")
+    // Нечеткое сравнение (для окончаний)
     if (script.length > 4 && spoken.length > 4) {
         if (script.startsWith(spoken.substring(0, script.length - 2))) return true;
     }
-    
     return false;
 }
 
-// --- 5. Логика Визуала и Скролла ---
+function jumpTo(index) {
+    highlightWord(index);
+    currentWordIndex = index + 1;
+    performScroll(index);
+}
 
 function highlightWord(index) {
-    // Удаляем подсветку со всех предыдущих (на всякий случай)
-    scriptWords.forEach(w => w.element.classList.remove('active-word'));
-    
-    // Подсвечиваем текущее
+    document.querySelectorAll('.active-word').forEach(el => el.classList.remove('active-word'));
     if (scriptWords[index]) {
         scriptWords[index].element.classList.add('active-word');
     }
 }
 
 function performScroll(index) {
-    const wordObj = scriptWords[index];
-    if (!wordObj) return;
+    const offset = parseInt(inputScrollOffset.value) || 2;
+    let target = index + offset;
+    if (target >= scriptWords.length) target = scriptWords.length - 1;
+    
+    if (scriptWords[target]) {
+        scriptWords[target].element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+}
 
-    const offsetSetting = parseInt(inputScrollOffset.value) || 2;
-    
-    // Логика скролла: Мы хотим, чтобы текущее слово было по центру экрана.
-    // scrollIntoView({ block: 'center' }) делает это идеально.
-    // Но пользователь просил скроллить заранее.
-    
-    // Мы можем схитрить: скроллить к элементу, который находится на N слов ВПЕРЕДИ.
-    let targetIndex = index + offsetSetting; 
-    if (targetIndex >= scriptWords.length) targetIndex = scriptWords.length - 1;
-    
-    const targetElement = scriptWords[targetIndex].element;
+// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (МИКРОФОН, КАМЕРА) ---
 
-    targetElement.scrollIntoView({
-        behavior: 'smooth',
-        block: 'center', // Стараться держать слово по центру
-    });
+function startListening() { try { recognition.start(); isListening = true; updateMicVisuals(true); } catch(e){} }
+function stopListening() { if(recognition) recognition.stop(); isListening = false; updateMicVisuals(false); }
+
+function updateMicVisuals(active) {
+    if (active) { btnMic.classList.add('listening'); statusText.textContent = "Слушаю..."; }
+    else { btnMic.classList.remove('listening'); statusText.textContent = "Стоп"; }
+}
+
+async function startCamera() {
+    try {
+        cameraStream = await navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: "user", width: { ideal: 1920 }, height: { ideal: 1080 } }, 
+            audio: true 
+        });
+        cameraPreview.srcObject = cameraStream;
+        cameraPreview.play();
+        return true;
+    } catch (err) { alert("Ошибка доступа к камере."); return false; }
+}
+
+function stopCamera() {
+    if (cameraStream) { cameraStream.getTracks().forEach(track => track.stop()); cameraStream = null; }
+}
+
+function startRecording() {
+    if (!cameraStream) return;
+    recordedChunks = [];
+    const types = ["video/mp4", "video/webm;codecs=h264", "video/webm;codecs=vp9", "video/webm"];
+    selectedMimeType = types.find(type => MediaRecorder.isTypeSupported(type)) || "";
+    if (!selectedMimeType) return alert("Запись видео не поддерживается.");
+
+    try { mediaRecorder = new MediaRecorder(cameraStream, { mimeType: selectedMimeType, videoBitsPerSecond: 2500000 }); } 
+    catch (e) { mediaRecorder = new MediaRecorder(cameraStream); selectedMimeType = ""; }
+
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = saveVideo;
+    mediaRecorder.start();
+    isRecording = true;
+    btnRecord.classList.add('recording');
+    if (!isListening) startListening();
+}
+
+function stopRecording() {
+    if (!mediaRecorder) return;
+    mediaRecorder.stop();
+    isRecording = false;
+    btnRecord.classList.remove('recording');
+    stopListening();
+}
+
+function saveVideo() {
+    const blob = new Blob(recordedChunks, { type: selectedMimeType || 'video/webm' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    let ext = selectedMimeType.includes("mp4") ? "mp4" : "webm";
+    const d = new Date();
+    a.download = `video_${d.getHours()}-${d.getMinutes()}.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { document.body.removeChild(a); window.URL.revokeObjectURL(url); }, 100);
 }
