@@ -3,103 +3,85 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Умный Суфлер</title>
+    <title>Умный Суфлер + Видео</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-    <!-- ЭКРАН 1: Настройки и Ввод -->
+    <!-- ЭКРАН 1: Настройки -->
     <div id="setup-screen" class="screen">
-        <h1>🎙️ Настройка Суфлера</h1>
+        <h1>🎥 Видео-Суфлер</h1>
         
-        <!-- Поле ввода текста -->
         <div class="input-group">
             <label for="source-text">Ваш сценарий:</label>
-            <textarea id="source-text" placeholder="Вставьте текст сюда..."></textarea>
+            <textarea id="source-text" placeholder="Вставьте текст сюда...">
+Создано независимым разработчиком t.me/SPEKTR_SP в исключительно некоммерческих целях
+</textarea>
         </div>
 
-        <!-- Панель настроек -->
         <div class="settings-panel">
+            <!-- Настройки текста -->
+            <div class="setting-item">
+                <label>Размер (px):</label>
+                <input type="number" id="font-size" value="50" min="20" max="200">
+            </div>
             
-            <!-- Колонка 1: Визуал -->
             <div class="setting-item">
-                <label for="font-size">Размер (px):</label>
-                <input type="number" id="font-size" value="60" min="20" max="200">
-            </div>
-
-            <div class="setting-item">
-                <label for="font-family">Шрифт:</label>
-                <select id="font-family">
-                    <option value="Arial, sans-serif">Arial (Без засечек)</option>
-                    <option value="'Times New Roman', serif">Times (С засечками)</option>
-                    <option value="'Courier New', monospace">Courier (Моно)</option>
-                    <option value="system-ui">Системный</option>
-                </select>
-            </div>
-
-            <!-- Колонка 2: Цвета -->
-            <div class="setting-item">
-                <label for="text-color">Текст:</label>
-                <input type="color" id="text-color" value="#ffffff">
-            </div>
-
-            <div class="setting-item">
-                <label for="bg-color">Фон:</label>
-                <input type="color" id="bg-color" value="#000000">
-            </div>
-
-            <!-- Колонка 3: Логика -->
-            <div class="setting-item full-width">
-                <label for="scroll-offset">Скролл, когда осталось слов до низа:</label>
+                <label>Скролл (слов):</label>
                 <select id="scroll-offset">
-                    <option value="1">1 (Последнее)</option>
-                    <option value="2" selected>2 (Предпоследнее)</option>
-                    <option value="3">3 (Третье с конца)</option>
-                    <option value="5">5 (Заранее)</option>
+                    <option value="1">1</option>
+                    <option value="2" selected>2</option>
+                    <option value="3">3</option>
                 </select>
             </div>
 
-            <div class="setting-item full-width">
-                <label>
-                    <input type="checkbox" id="limit-search-toggle">
-                    Не листать дальше ограниченного окна слов
-                </label>
+            <!-- Настройки Камеры -->
+            <div class="setting-item full-width checkbox-item">
+                <input type="checkbox" id="camera-toggle">
+                <label for="camera-toggle">📸 Включить режим камеры</label>
             </div>
-
-            <div class="setting-item full-width">
-                <label for="max-visible-words">Сколько слов впереди система видит:</label>
-                <select id="max-visible-words" disabled>
-                    <option value="5">5</option>
-                    <option value="10" selected>10</option>
-                    <option value="15">15</option>
-                    <option value="20">20</option>
-                    <option value="30">30</option>
-                </select>
-            </div>
-
-            <div class="setting-item full-width">
-                <label>
-                    <input type="checkbox" id="voice-jump-toggle">
-                    Включить голосовые команды переноса ("перенос пять", "перенос десять")
-                </label>
-            </div>
+            
+            <!-- Скрытые настройки цвета (оставим дефолт) -->
+            <input type="hidden" id="text-color" value="#ffffff">
+            <input type="hidden" id="bg-color" value="#000000">
+            <input type="hidden" id="font-family" value="Arial, sans-serif">
         </div>
 
         <button id="btn-start" class="primary-btn">▶ ЗАПУСТИТЬ</button>
+
+        <div class="credits">
+            Создано независимым разработчиком <br>
+            <a href="https://t.me/SPEKTR_SP" target="_blank">t.me/SPEKTR_SP</a> <br>
+            в исключительно некоммерческих целях
+        </div>
     </div>
 
-    <!-- ЭКРАН 2: Режим чтения -->
+    <!-- ЭКРАН 2: Суфлер -->
     <div id="prompter-screen" class="screen hidden">
-        <!-- Контейнер для текста (стили применятся JS-ом) -->
+        <!-- Видео-превью (фон) -->
+        <video id="camera-preview" autoplay playsinline muted></video>
+
+        <!-- Текст -->
         <div id="content-display"></div>
         
-        <!-- Панель управления (внизу) -->
+        <!-- Панель управления -->
         <div class="controls">
-            <button id="btn-back" class="small-btn">⚙ Настройки</button>
-            <div class="mic-container">
-                <button id="btn-mic" class="circle-btn">🎤</button>
-                <span id="status-indicator">Остановлено</span>
+            <button id="btn-back" class="small-btn">⚙</button>
+            
+            <!-- Группа центральных кнопок -->
+            <div class="center-controls">
+                <!-- Кнопка Записи Видео -->
+                <button id="btn-record" class="record-btn hidden">REC</button>
+                
+                <!-- Кнопка Микрофона (Слушатель) -->
+                <div class="mic-wrapper">
+                    <button id="btn-mic" class="circle-btn">🎤</button>
+                    <span id="status-indicator">Стоп</span>
+                </div>
             </div>
+
+            <!-- Пустой блок для баланса -->
+            <div style="width: 40px;"></div>
         </div>
     </div>
 
